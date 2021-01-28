@@ -1,30 +1,30 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the Apache License.
 
-import zipfile, time
+import os
+import time
+import zipfile
 
-from azurelinuxagent.common.protocol.restapi import ExtHandler, ExtHandlerProperties, ExtHandlerPackage, ExtHandlerVersionUri
-from azurelinuxagent.common.protocol.wire import WireProtocol
-from azurelinuxagent.ga.exthandlers import ExtHandlerInstance, NUMBER_OF_DOWNLOAD_RETRIES
 from azurelinuxagent.common.exception import ExtensionDownloadError, ExtensionErrorCodes
-from tests.tools import *
+from azurelinuxagent.common.protocol.restapi import ExtHandler, ExtHandlerProperties, ExtHandlerPackage, \
+    ExtHandlerVersionUri
+from azurelinuxagent.common.protocol.wire import WireProtocol
+from azurelinuxagent.ga.exthandlers import ExtHandlerInstance, NUMBER_OF_DOWNLOAD_RETRIES, ExtHandlerState
+from tests.tools import AgentTestCase, patch, mock_sleep
 
-class DownloadExtensionTestCase(AgentTestCase):
+
+class DownloadExtensionTestCase(AgentTestCase): # pylint: disable=too-many-instance-attributes
     """
     Test cases for launch_command
     """
     @classmethod
     def setUpClass(cls):
         AgentTestCase.setUpClass()
-        cls.mock_cgroups = patch("azurelinuxagent.ga.exthandlers.CGroups")
+        cls.mock_cgroups = patch("azurelinuxagent.ga.exthandlers.CGroupConfigurator")
         cls.mock_cgroups.start()
-
-        cls.mock_cgroups_telemetry = patch("azurelinuxagent.ga.exthandlers.CGroupsTelemetry")
-        cls.mock_cgroups_telemetry.start()
 
     @classmethod
     def tearDownClass(cls):
-        cls.mock_cgroups_telemetry.stop()
         cls.mock_cgroups.stop()
 
         AgentTestCase.tearDownClass()
@@ -72,7 +72,7 @@ class DownloadExtensionTestCase(AgentTestCase):
 
     @staticmethod
     def _create_zip_file(filename):
-        file = None
+        file = None # pylint: disable=redefined-builtin
         try:
             file = zipfile.ZipFile(filename, "w")
             info = zipfile.ZipInfo(DownloadExtensionTestCase._extension_command)
@@ -85,11 +85,11 @@ class DownloadExtensionTestCase(AgentTestCase):
 
     @staticmethod
     def _create_invalid_zip_file(filename):
-        with open(filename, "w") as file:
+        with open(filename, "w") as file: # pylint: disable=redefined-builtin
             file.write("An invalid ZIP file\n")
 
     def _get_extension_package_file(self):
-        return os.path.join(self.agent_dir, os.path.basename(self.pkg.uris[0].uri) + ".zip")
+        return os.path.join(self.agent_dir, self.ext_handler_instance.get_extension_package_zipfile_name())
 
     def _get_extension_command_file(self):
         return os.path.join(self.extension_dir, DownloadExtensionTestCase._extension_command)
@@ -104,10 +104,12 @@ class DownloadExtensionTestCase(AgentTestCase):
             return True
 
         with patch("azurelinuxagent.common.protocol.wire.WireProtocol.download_ext_handler_pkg", side_effect=download_ext_handler_pkg) as mock_download_ext_handler_pkg:
-            self.ext_handler_instance.download()
+            with patch("azurelinuxagent.ga.exthandlers.ExtHandlerInstance.report_event") as mock_report_event:
+                self.ext_handler_instance.download()
 
         # first download attempt should succeed
         mock_download_ext_handler_pkg.assert_called_once()
+        mock_report_event.assert_called_once()
 
         self._assert_download_and_expand_succeeded()
 
@@ -115,9 +117,11 @@ class DownloadExtensionTestCase(AgentTestCase):
         DownloadExtensionTestCase._create_zip_file(self._get_extension_package_file())
 
         with patch("azurelinuxagent.common.protocol.wire.WireProtocol.download_ext_handler_pkg") as mock_download_ext_handler_pkg:
-            self.ext_handler_instance.download()
+            with patch("azurelinuxagent.ga.exthandlers.ExtHandlerInstance.report_event") as mock_report_event:
+                self.ext_handler_instance.download()
 
         mock_download_ext_handler_pkg.assert_not_called()
+        mock_report_event.assert_not_called()
 
         self.assertTrue(os.path.exists(self._get_extension_command_file()), "The extension package was not expanded to the expected location")
 
@@ -135,8 +139,55 @@ class DownloadExtensionTestCase(AgentTestCase):
 
         self._assert_download_and_expand_succeeded()
 
+    def test_it_should_maintain_extension_handler_state_when_good_zip_exists(self):
+        DownloadExtensionTestCase._create_zip_file(self._get_extension_package_file())
+        self.ext_handler_instance.set_handler_state(ExtHandlerState.NotInstalled)
+        self.ext_handler_instance.download()
+        self._assert_download_and_expand_succeeded()
+        self.assertTrue(os.path.exists(os.path.join(self.ext_handler_instance.get_conf_dir(), "HandlerState")),
+                        "Ensure that the HandlerState file exists on disk")
+        self.assertEqual(self.ext_handler_instance.get_handler_state(), ExtHandlerState.NotInstalled,
+                         "Ensure that the state is maintained for extension HandlerState")
+
+    def test_it_should_maintain_extension_handler_state_when_bad_zip_exists_and_recovers_with_good_zip(self):
+        def download_ext_handler_pkg(_uri, destination):
+            DownloadExtensionTestCase._create_zip_file(destination)
+            return True
+
+        DownloadExtensionTestCase._create_invalid_zip_file(self._get_extension_package_file())
+        self.ext_handler_instance.set_handler_state(ExtHandlerState.NotInstalled)
+
+        with patch("azurelinuxagent.common.protocol.wire.WireProtocol.download_ext_handler_pkg",
+                   side_effect=download_ext_handler_pkg) as mock_download_ext_handler_pkg:
+            self.ext_handler_instance.download()
+
+        mock_download_ext_handler_pkg.assert_called_once()
+        self._assert_download_and_expand_succeeded()
+        self.assertEqual(self.ext_handler_instance.get_handler_state(), ExtHandlerState.NotInstalled,
+                         "Ensure that the state is maintained for extension HandlerState")
+
+    @patch('time.sleep', side_effect=lambda _: mock_sleep(0.001))
+    def test_it_should_maintain_extension_handler_state_when_it_downloads_bad_zips(self, _):
+        def download_ext_handler_pkg(_uri, destination):
+            DownloadExtensionTestCase._create_invalid_zip_file(destination)
+            return True
+
+        self.ext_handler_instance.set_handler_state(ExtHandlerState.NotInstalled)
+
+        with patch("azurelinuxagent.common.protocol.wire.WireProtocol.download_ext_handler_pkg",
+                   side_effect=download_ext_handler_pkg):
+            with self.assertRaises(ExtensionDownloadError):
+                self.ext_handler_instance.download()
+
+        self.assertFalse(os.path.exists(self._get_extension_package_file()),
+                        "The bad zip extension package should not be downloaded to the expected location")
+        self.assertFalse(os.path.exists(self._get_extension_command_file()),
+                        "The extension package should not expanded be to the expected location due to bad zip")
+        self.assertEqual(self.ext_handler_instance.get_handler_state(), ExtHandlerState.NotInstalled,
+                         "Ensure that the state is maintained for extension HandlerState")
+
     def test_it_should_use_alternate_uris_when_download_fails(self):
-        self.download_failures = 0
+        self.download_failures = 0 # pylint: disable=attribute-defined-outside-init
 
         def download_ext_handler_pkg(_uri, destination):
             # fail a few times, then succeed
@@ -149,12 +200,12 @@ class DownloadExtensionTestCase(AgentTestCase):
         with patch("azurelinuxagent.common.protocol.wire.WireProtocol.download_ext_handler_pkg", side_effect=download_ext_handler_pkg) as mock_download_ext_handler_pkg:
             self.ext_handler_instance.download()
 
-        self.assertEquals(mock_download_ext_handler_pkg.call_count, self.download_failures + 1)
+        self.assertEqual(mock_download_ext_handler_pkg.call_count, self.download_failures + 1)
 
         self._assert_download_and_expand_succeeded()
 
     def test_it_should_use_alternate_uris_when_download_raises_an_exception(self):
-        self.download_failures = 0
+        self.download_failures = 0 # pylint: disable=attribute-defined-outside-init
 
         def download_ext_handler_pkg(_uri, destination):
             # fail a few times, then succeed
@@ -167,12 +218,12 @@ class DownloadExtensionTestCase(AgentTestCase):
         with patch("azurelinuxagent.common.protocol.wire.WireProtocol.download_ext_handler_pkg", side_effect=download_ext_handler_pkg) as mock_download_ext_handler_pkg:
             self.ext_handler_instance.download()
 
-        self.assertEquals(mock_download_ext_handler_pkg.call_count, self.download_failures + 1)
+        self.assertEqual(mock_download_ext_handler_pkg.call_count, self.download_failures + 1)
 
         self._assert_download_and_expand_succeeded()
 
     def test_it_should_use_alternate_uris_when_it_downloads_an_invalid_package(self):
-        self.download_failures = 0
+        self.download_failures = 0 # pylint: disable=attribute-defined-outside-init
 
         def download_ext_handler_pkg(_uri, destination):
             # fail a few times, then succeed
@@ -186,7 +237,7 @@ class DownloadExtensionTestCase(AgentTestCase):
         with patch("azurelinuxagent.common.protocol.wire.WireProtocol.download_ext_handler_pkg", side_effect=download_ext_handler_pkg) as mock_download_ext_handler_pkg:
             self.ext_handler_instance.download()
 
-        self.assertEquals(mock_download_ext_handler_pkg.call_count, self.download_failures + 1)
+        self.assertEqual(mock_download_ext_handler_pkg.call_count, self.download_failures + 1)
 
         self._assert_download_and_expand_succeeded()
 
@@ -200,10 +251,10 @@ class DownloadExtensionTestCase(AgentTestCase):
                 with self.assertRaises(ExtensionDownloadError) as context_manager:
                     self.ext_handler_instance.download()
 
-        self.assertEquals(mock_download_ext_handler_pkg.call_count, NUMBER_OF_DOWNLOAD_RETRIES * len(self.pkg.uris))
+        self.assertEqual(mock_download_ext_handler_pkg.call_count, NUMBER_OF_DOWNLOAD_RETRIES * len(self.pkg.uris))
 
         self.assertRegex(str(context_manager.exception), "Failed to download extension")
-        self.assertEquals(context_manager.exception.code, ExtensionErrorCodes.PluginManifestDownloadError)
+        self.assertEqual(context_manager.exception.code, ExtensionErrorCodes.PluginManifestDownloadError)
 
         self.assertFalse(os.path.exists(self.extension_dir), "The extension directory was not removed")
         self.assertFalse(os.path.exists(self._get_extension_package_file()), "The extension package was not removed")

@@ -15,14 +15,14 @@
 # Requires Python 2.6+ and Openssl 1.0+
 #
 
-from distutils.version import LooseVersion as Version
-from tests.tools import *
-
 import hashlib
+import os
+import unittest
+from distutils.version import LooseVersion as Version  # pylint: disable=no-name-in-module,import-error
 
 import azurelinuxagent.common.utils.textutil as textutil
-
 from azurelinuxagent.common.future import ustr
+from tests.tools import AgentTestCase
 
 
 class TestTextUtil(AgentTestCase):
@@ -33,7 +33,7 @@ class TestTextUtil(AgentTestCase):
                 data = textutil.remove_bom(data)
                 data = ustr(data, encoding='utf-8')
                 password_hash = textutil.gen_password_hash(data, 6, 10)
-                self.assertNotEquals(None, password_hash)
+                self.assertNotEqual(None, password_hash)
 
     def test_replace_non_ascii(self):
         data = ustr(b'\xef\xbb\xbfhehe', encoding='utf-8')
@@ -52,31 +52,31 @@ class TestTextUtil(AgentTestCase):
         #Test bom could be removed
         data = ustr(b'\xef\xbb\xbfhehe', encoding='utf-8')
         data = textutil.remove_bom(data)
-        self.assertNotEquals(0xbb, data[0])
+        self.assertNotEqual(0xbb, data[0])
 
         #bom is comprised of a sequence of three bytes and ff length of the input is shorter
         # than three bytes, remove_bom should not do anything
         data = u"\xa7"
         data = textutil.remove_bom(data)
-        self.assertEquals(data, data[0])
+        self.assertEqual(data, data[0])
 
         data = u"\xa7\xef"
         data = textutil.remove_bom(data)
-        self.assertEquals(u"\xa7", data[0])
-        self.assertEquals(u"\xef", data[1])
+        self.assertEqual(u"\xa7", data[0])
+        self.assertEqual(u"\xef", data[1])
 
         #Test string without BOM is not affected
         data = u"hehe"
         data = textutil.remove_bom(data)
-        self.assertEquals(u"h", data[0])
+        self.assertEqual(u"h", data[0])
 
         data = u""
         data = textutil.remove_bom(data)
-        self.assertEquals(u"", data)
+        self.assertEqual(u"", data)
 
         data = u"  "
         data = textutil.remove_bom(data)
-        self.assertEquals(u"  ", data)
+        self.assertEqual(u"  ", data)
 
     def test_version_compare(self):
         self.assertTrue(Version("1.0") < Version("1.1"))
@@ -100,14 +100,14 @@ class TestTextUtil(AgentTestCase):
                    "certificate\n"
                    "-----END CERTIFICATE----\n")
         base64_bytes = textutil.get_bytes_from_pem(content)
-        self.assertEquals("certificate", base64_bytes)
+        self.assertEqual("certificate", base64_bytes)
 
 
         content = ("-----BEGIN PRIVATE KEY-----\n"
                    "private key\n"
                    "-----END PRIVATE Key-----\n")
         base64_bytes = textutil.get_bytes_from_pem(content)
-        self.assertEquals("private key", base64_bytes)
+        self.assertEqual("private key", base64_bytes)
 
     def test_swap_hexstring(self):
         data = [
@@ -137,7 +137,7 @@ class TestTextUtil(AgentTestCase):
             ['aBcdEf12', 4, 'Ef12aBcd']
         ]
 
-        for t in data:
+        for t in data: # pylint: disable=invalid-name
             self.assertEqual(t[2], textutil.swap_hexstring(t[0], width=t[1]))
 
     def test_compress(self):
@@ -193,6 +193,18 @@ class TestTextUtil(AgentTestCase):
 
         self.assertNotEqual(textutil.is_str_none_or_whitespace(hex_null_1), textutil.is_str_empty(hex_null_1))
         self.assertNotEqual(textutil.is_str_none_or_whitespace(hex_null_2), textutil.is_str_empty(hex_null_2))
+
+    def test_format_memory_value(self):
+        """
+        Test formatting of memory amounts into human-readable units
+        """
+        self.assertEqual(2048, textutil.format_memory_value('kilobytes', 2))
+        self.assertEqual(0, textutil.format_memory_value('kilobytes', 0))
+        self.assertEqual(2048000, textutil.format_memory_value('kilobytes', 2000))
+        self.assertEqual(2048 * 1024, textutil.format_memory_value('megabytes', 2))
+        self.assertEqual((1024 + 512) * 1024 * 1024, textutil.format_memory_value('gigabytes', 1.5))
+        self.assertRaises(ValueError, textutil.format_memory_value, 'KiloBytes', 1)
+        self.assertRaises(TypeError, textutil.format_memory_value, 'bytes', None)
 
 
 if __name__ == '__main__':

@@ -31,7 +31,7 @@ class OpenWRTOSUtil(DefaultOSUtil):
         super(OpenWRTOSUtil, self).__init__()
         self.agent_conf_file_path = '/etc/waagent.conf'
         self.dhclient_name = 'udhcpc'
-        self.ip_command_output = re.compile('^\d+:\s+(\w+):\s+(.*)$')
+        self.ip_command_output = re.compile('^\d+:\s+(\w+):\s+(.*)$') # pylint: disable=W1401
         self.jit_enabled = True
         
     def eject_dvd(self, chk_err=True):
@@ -47,25 +47,19 @@ class OpenWRTOSUtil(DefaultOSUtil):
             return
 
         if expiration is not None:
-            cmd = "useradd -m {0} -s /bin/ash -e {1}".format(username, expiration)
+            cmd = ["useradd", "-m", username, "-s", "/bin/ash", "-e", expiration]
         else:
-            cmd = "useradd -m {0} -s /bin/ash".format(username)
+            cmd = ["useradd", "-m", username, "-s", "/bin/ash"]
         
         if not os.path.exists("/home"):
             os.mkdir("/home")
 
         if comment is not None:
-            cmd += " -c {0}".format(comment)
-        retcode, out = shellutil.run_get_output(cmd)
-        if retcode != 0:
-            raise OSUtilError(("Failed to create user account:{0}, "
-                               "retcode:{1}, "
-                               "output:{2}").format(username, retcode, out))
+            cmd.extend(["-c", comment])
+        self._run_command_raising_OSUtilError(cmd, err_msg="Failed to create user account:{0}".format(username))
 
     def get_dhcp_pid(self):
-        cmd = "pidof {0}".format(self.dhclient_name)
-        ret= shellutil.run_get_output(cmd, chk_err=False)
-        return ret[1] if ret[0] == 0 else None
+        return self._get_dhcp_pid(["pidof", self.dhclient_name])
 
     def get_nic_state(self):
         """
@@ -127,28 +121,30 @@ class OpenWRTOSUtil(DefaultOSUtil):
     def start_network(self) :
         return shellutil.run("/etc/init.d/network start", chk_err=True)
 
-    def restart_ssh_service(self):
+    def restart_ssh_service(self): # pylint: disable=R1710
         # Since Dropbear is the default ssh server on OpenWRt, lets do a sanity check
-        if os.path.exists("/etc/init.d/sshd"):
+        if os.path.exists("/etc/init.d/sshd"): # pylint: disable=R1705
             return shellutil.run("/etc/init.d/sshd restart", chk_err=True)
         else:
-            logger.warn("sshd service does not exists", username)
+            logger.warn("sshd service does not exists")
 
     def stop_agent_service(self):
-        return shellutil.run("/etc/init.d/waagent stop", chk_err=True)
+        return shellutil.run("/etc/init.d/{0} stop".format(self.service_name), chk_err=True)
 
     def start_agent_service(self):
-        return shellutil.run("/etc/init.d/waagent start", chk_err=True)
+        return shellutil.run("/etc/init.d/{0} start".format(self.service_name), chk_err=True)
 
     def register_agent_service(self):
-        return shellutil.run("/etc/init.d/waagent enable", chk_err=True)
+        return shellutil.run("/etc/init.d/{0} enable".format(self.service_name), chk_err=True)
 
     def unregister_agent_service(self):
-        return shellutil.run("/etc/init.d/waagent disable", chk_err=True)
+        return shellutil.run("/etc/init.d/{0} disable".format(self.service_name), chk_err=True)
 
     def set_hostname(self, hostname):
         fileutil.write_file('/etc/hostname', hostname)
-        shellutil.run("uci set system.@system[0].hostname='{0}' && uci commit system && /etc/init.d/system reload".format(hostname), chk_err=False)
+        commands = [['uci', 'set', 'system.@system[0].hostname={0}'.format(hostname)], ['uci', 'commit', 'system'],
+                    ['/etc/init.d/system', 'reload']]
+        self._run_multiple_commands_without_raising(commands, log_error=False, continue_on_error=False)
 
     def remove_rules_files(self, rules_files=""):
         pass

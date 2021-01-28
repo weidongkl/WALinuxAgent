@@ -18,10 +18,17 @@
 import mock
 import azurelinuxagent.common.dhcp as dhcp
 import azurelinuxagent.common.osutil.default as osutil
-from tests.tools import *
+from tests.tools import AgentTestCase, open_patch, patch
 
 
 class TestDHCP(AgentTestCase):
+
+    def setUp(self):
+        AgentTestCase.setUp(self)
+
+    def tearDown(self):
+        AgentTestCase.tearDown(self)
+
     def test_wireserver_route_exists(self):
         # setup
         dhcp_handler = dhcp.get_dhcp_handler()
@@ -41,7 +48,7 @@ class TestDHCP(AgentTestCase):
                         "00FCFFFF	0	0	0   \n"
 
         with patch("os.path.exists", return_value=True):
-            mo = mock.mock_open(read_data=routing_table)
+            mo = mock.mock_open(read_data=routing_table) # pylint: disable=invalid-name
             with patch(open_patch(), mo):
                 self.assertTrue(dhcp_handler.wireserver_route_exists)
 

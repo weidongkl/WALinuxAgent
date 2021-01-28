@@ -1,4 +1,4 @@
-# Copyright 2018 Microsoft Corporation
+# Copyright 2018 Microsoft Corporation # pylint: disable=invalid-name
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,9 +21,10 @@
 import os
 import stat
 import sys
+import unittest
 from azurelinuxagent.common.utils import shellutil
 from azurelinuxagent.daemon.resourcedisk import get_resourcedisk_handler
-from tests.tools import *
+from tests.tools import AgentTestCase, patch
 
 
 class TestResourceDisk(AgentTestCase):
@@ -119,7 +120,7 @@ class TestResourceDisk(AgentTestCase):
         if os.path.exists(test_file):
             os.remove(test_file)
 
-        with open(test_file, "wb") as file:
+        with open(test_file, "wb") as file: # pylint: disable=redefined-builtin
             file.write(bytearray(file_size))
 
         os.chmod(test_file, stat.S_ISUID | stat.S_ISGID | stat.S_IRUSR |

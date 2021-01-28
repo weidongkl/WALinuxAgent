@@ -29,15 +29,28 @@ class Ubuntu14OSUtil(DefaultOSUtil):
     def __init__(self):
         super(Ubuntu14OSUtil, self).__init__()
         self.jit_enabled = True
+        self.service_name = self.get_service_name()
+
+    @staticmethod
+    def get_service_name():
+        return "walinuxagent"
 
     def start_network(self):
         return shellutil.run("service networking start", chk_err=False)
 
     def stop_agent_service(self):
-        return shellutil.run("service walinuxagent stop", chk_err=False)
+        try:
+            shellutil.run_command(["service", self.service_name, "stop"])
+        except shellutil.CommandError as cmd_err:
+            return cmd_err.returncode
+        return 0
 
     def start_agent_service(self):
-        return shellutil.run("service walinuxagent start", chk_err=False)
+        try:
+            shellutil.run_command(["service", self.service_name, "start"])
+        except shellutil.CommandError as cmd_err:
+            return cmd_err.returncode
+        return 0
 
     def remove_rules_files(self, rules_files=""):
         pass
@@ -50,16 +63,12 @@ class Ubuntu14OSUtil(DefaultOSUtil):
 
 
 class Ubuntu12OSUtil(Ubuntu14OSUtil):
-    def __init__(self):
+    def __init__(self): # pylint: disable=W0235
         super(Ubuntu12OSUtil, self).__init__()
 
     # Override
     def get_dhcp_pid(self):
-        ret = shellutil.run_get_output("pidof dhclient3", chk_err=False)
-        return ret[1] if ret[0] == 0 else None
-
-    def mount_cgroups(self):
-        pass
+        return self._get_dhcp_pid(["pidof", "dhclient3"])
 
 
 class Ubuntu16OSUtil(Ubuntu14OSUtil):
@@ -68,30 +77,25 @@ class Ubuntu16OSUtil(Ubuntu14OSUtil):
     """
     def __init__(self):
         super(Ubuntu16OSUtil, self).__init__()
+        self.service_name = self.get_service_name()
 
     def register_agent_service(self):
-        return shellutil.run("systemctl unmask walinuxagent", chk_err=False)
+        return shellutil.run("systemctl unmask {0}".format(self.service_name), chk_err=False)
 
     def unregister_agent_service(self):
-        return shellutil.run("systemctl mask walinuxagent", chk_err=False)
-
-    def mount_cgroups(self):
-        """
-        Mounted by default in Ubuntu 16.04
-        """
-        pass
+        return shellutil.run("systemctl mask {0}".format(self.service_name), chk_err=False)
 
 
 class Ubuntu18OSUtil(Ubuntu16OSUtil):
     """
-    Ubuntu 18.04
+    Ubuntu 18.04, 18.10, 19.04, 19.10, 20.04
     """
     def __init__(self):
         super(Ubuntu18OSUtil, self).__init__()
+        self.service_name = self.get_service_name()
 
     def get_dhcp_pid(self):
-        ret = shellutil.run_get_output("pidof systemd-networkd")
-        return ret[1] if ret[0] == 0 else None
+        return self._get_dhcp_pid(["pidof", "systemd-networkd"])
 
     def start_network(self):
         return shellutil.run("systemctl start systemd-networkd", chk_err=False)
@@ -106,14 +110,14 @@ class Ubuntu18OSUtil(Ubuntu16OSUtil):
         return self.stop_network()
 
     def start_agent_service(self):
-        return shellutil.run("systemctl start walinuxagent", chk_err=False)
+        return shellutil.run("systemctl start {0}".format(self.service_name), chk_err=False)
 
     def stop_agent_service(self):
-        return shellutil.run("systemctl stop walinuxagent", chk_err=False)
+        return shellutil.run("systemctl stop {0}".format(self.service_name), chk_err=False)
 
 
 class UbuntuOSUtil(Ubuntu16OSUtil):
-    def __init__(self):
+    def __init__(self): # pylint: disable=W0235
         super(UbuntuOSUtil, self).__init__()
 
     def restart_if(self, ifname, retries=3, wait=5):
@@ -123,15 +127,17 @@ class UbuntuOSUtil(Ubuntu16OSUtil):
         """
         retry_limit=retries+1
         for attempt in range(1, retry_limit):
-            return_code=shellutil.run("ip link set {0} down && ip link set {0} up".format(ifname))
-            if return_code == 0:
-                return
-            logger.warn("failed to restart {0}: return code {1}".format(ifname, return_code))
-            if attempt < retry_limit:
-                logger.info("retrying in {0} seconds".format(wait))
-                time.sleep(wait)
-            else:
-                logger.warn("exceeded restart retries")
+            try:
+                shellutil.run_command(["ip", "link", "set", ifname, "down"])
+                shellutil.run_command(["ip", "link", "set", ifname, "up"])
+
+            except shellutil.CommandError as cmd_err:
+                logger.warn("failed to restart {0}: return code {1}".format(ifname, cmd_err.returncode))
+                if attempt < retry_limit:
+                    logger.info("retrying in {0} seconds".format(wait))
+                    time.sleep(wait)
+                else:
+                    logger.warn("exceeded restart retries")
 
 
 class UbuntuSnappyOSUtil(Ubuntu14OSUtil):

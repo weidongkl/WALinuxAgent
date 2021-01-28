@@ -29,7 +29,7 @@ import azurelinuxagent.common.conf as conf
 import azurelinuxagent.common.logger as logger
 import azurelinuxagent.common.utils.textutil as textutil
 
-from azurelinuxagent.common.exception import HttpError, ResourceGoneError
+from azurelinuxagent.common.exception import HttpError, ResourceGoneError, InvalidContainerError
 from azurelinuxagent.common.future import httpclient, urlparse, ustr
 from azurelinuxagent.common.version import PY_VERSION_MAJOR, AGENT_NAME, GOAL_STATE_AGENT_VERSION
 
@@ -96,14 +96,15 @@ NO_PROXY_ENV = "no_proxy"
 HTTP_USER_AGENT = "{0}/{1}".format(AGENT_NAME, GOAL_STATE_AGENT_VERSION)
 HTTP_USER_AGENT_HEALTH = "{0}+health".format(HTTP_USER_AGENT)
 INVALID_CONTAINER_CONFIGURATION = "InvalidContainerConfiguration"
+REQUEST_ROLE_CONFIG_FILE_NOT_FOUND = "RequestRoleConfigFileNotFound"
 
-DEFAULT_PROTOCOL_ENDPOINT = '168.63.129.16'
+KNOWN_WIRESERVER_IP = '168.63.129.16'
 HOST_PLUGIN_PORT = 32526
 
 
 class IOErrorCounter(object):
     _lock = threading.RLock()
-    _protocol_endpoint = DEFAULT_PROTOCOL_ENDPOINT
+    _protocol_endpoint = KNOWN_WIRESERVER_IP
     _counts = {"hostplugin":0, "protocol":0, "other":0}
 
     @staticmethod
@@ -130,22 +131,22 @@ class IOErrorCounter(object):
             IOErrorCounter._counts = {"hostplugin":0, "protocol":0, "other":0}
 
     @staticmethod
-    def set_protocol_endpoint(endpoint=DEFAULT_PROTOCOL_ENDPOINT):
+    def set_protocol_endpoint(endpoint=KNOWN_WIRESERVER_IP):
         IOErrorCounter._protocol_endpoint = endpoint
 
 
 def _compute_delay(retry_attempt=1, delay=DELAY_IN_SECONDS):
     fib = (1, 1)
-    for n in range(retry_attempt):
+    for _ in range(retry_attempt):
         fib = (fib[1], fib[0]+fib[1])
     return delay*fib[1]
 
 
-def _is_retry_status(status, retry_codes=RETRY_CODES):
+def _is_retry_status(status, retry_codes=RETRY_CODES): # pylint: disable=W0102
     return status in retry_codes
 
 
-def _is_retry_exception(e):
+def _is_retry_exception(e): # pylint: disable=C0103
     return len([x for x in RETRY_EXCEPTIONS if isinstance(e, x)]) > 0
 
 
@@ -153,20 +154,12 @@ def _is_throttle_status(status):
     return status in THROTTLE_CODES
 
 
-def _is_invalid_container_configuration(response):
-    result = False
-    if response is not None and response.status == httpclient.BAD_REQUEST:
-        error_detail = read_response_error(response)
-        result = INVALID_CONTAINER_CONFIGURATION in error_detail
-    return result
-
-
 def _parse_url(url):
     """
     Parse URL to get the components of the URL broken down to host, port
     :rtype: string, int, bool, string
     """
-    o = urlparse(url)
+    o = urlparse(url) # pylint: disable=C0103
     rel_uri = o.path
     if o.fragment:
         rel_uri = "{0}#{1}".format(rel_uri, o.fragment)
@@ -210,7 +203,7 @@ def dotted_netmask(mask):
     return socket.inet_ntoa(struct.pack('>I', bits))
 
 
-def address_in_network(ip, net):
+def address_in_network(ip, net): # pylint: disable=C0103
     """This function allows you to check if an IP belongs to a network subnet
     Example: returns True if ip = 192.168.1.1 and net = 192.168.1.0/24
              returns False if ip = 192.168.1.1 and net = 192.168.100.0/24
@@ -278,7 +271,7 @@ def _get_http_proxy(secure=False):
     else:
         http_proxy_env = HTTPS_PROXY_ENV if secure else HTTP_PROXY_ENV
         http_proxy_url = None
-        for v in [http_proxy_env, http_proxy_env.upper()]:
+        for v in [http_proxy_env, http_proxy_env.upper()]: # pylint: disable=C0103
             if v in os.environ:
                 http_proxy_url = os.environ[v]
                 break
@@ -293,8 +286,8 @@ def redact_sas_tokens_in_urls(url):
     return SAS_TOKEN_RETRIEVAL_REGEX.sub(r"\1" + REDACTED_TEXT + r"\3", url)
 
 
-def _http_request(method, host, rel_uri, port=None, data=None, secure=False,
-                  headers=None, proxy_host=None, proxy_port=None):
+def _http_request(method, host, rel_uri, port=None, data=None, secure=False, # pylint: disable=R0913
+                  headers=None, proxy_host=None, proxy_port=None, redact_data=False):
 
     headers = {} if headers is None else headers
     headers['Connection'] = 'close'
@@ -326,24 +319,29 @@ def _http_request(method, host, rel_uri, port=None, data=None, secure=False,
                                          conn_port,
                                          timeout=10)
 
+    payload = data
+    if redact_data:
+        payload = "[REDACTED]"
+
     logger.verbose("HTTP connection [{0}] [{1}] [{2}] [{3}]",
                    method,
                    redact_sas_tokens_in_urls(url),
-                   data,
+                   payload,
                    headers)
 
     conn.request(method=method, url=url, body=data, headers=headers)
     return conn.getresponse()
 
 
-def http_request(method,
-                url, data, headers=None,
-                use_proxy=False,
-                max_retry=DEFAULT_RETRIES,
-                retry_codes=RETRY_CODES,
-                retry_delay=DELAY_IN_SECONDS):
+def http_request(method, # pylint: disable=R0913,R0912,W0102
+                 url, data, headers=None,
+                 use_proxy=False,
+                 max_retry=DEFAULT_RETRIES,
+                 retry_codes=RETRY_CODES,
+                 retry_delay=DELAY_IN_SECONDS,
+                 redact_data=False):
 
-    global SECURE_WARNING_EMITTED
+    global SECURE_WARNING_EMITTED # pylint: disable=W0603
 
     host, port, secure, rel_uri = _parse_url(url)
 
@@ -399,11 +397,11 @@ def http_request(method,
                                             delay=retry_delay)
 
             logger.verbose("[HTTP Retry] "
-                        "Attempt {0} of {1} will delay {2} seconds: {3}",
-                        attempt+1,
-                        max_retry,
-                        delay,
-                        msg)
+                        "Attempt {0} of {1} will delay {2} seconds: {3}", 
+                        attempt+1, 
+                        max_retry, 
+                        delay, 
+                        msg) 
 
             time.sleep(delay)
 
@@ -418,7 +416,8 @@ def http_request(method,
                                  secure=secure,
                                  headers=headers,
                                  proxy_host=proxy_host,
-                                 proxy_port=proxy_port)
+                                 proxy_port=proxy_port,
+                                 redact_data=redact_data)
             logger.verbose("[HTTP Response] Status Code {0}", resp.status)
 
             if request_failed(resp):
@@ -431,26 +430,29 @@ def http_request(method,
                         max_retry = max(max_retry, THROTTLE_RETRIES)
                     continue
 
+            # If we got a 410 (resource gone) for any reason, raise an exception. The caller will handle it by
+            # forcing a goal state refresh and retrying the call.
             if resp.status in RESOURCE_GONE_CODES:
-                raise ResourceGoneError()
+                response_error = read_response_error(resp)
+                raise ResourceGoneError(response_error)
 
-            # Map invalid container configuration errors to resource gone in
-            # order to force a goal state refresh, which in turn updates the
-            # container-id header passed to HostGAPlugin.
-            # See #1294.
-            if _is_invalid_container_configuration(resp):
-                raise ResourceGoneError()
+            # If we got a 400 (bad request) because the container id is invalid, it could indicate a stale goal
+            # state. The caller will handle this exception by forcing a goal state refresh and retrying the call.
+            if resp.status == httpclient.BAD_REQUEST:
+                response_error = read_response_error(resp)
+                if INVALID_CONTAINER_CONFIGURATION in response_error:
+                    raise InvalidContainerError(response_error)
 
             return resp
 
-        except httpclient.HTTPException as e:
+        except httpclient.HTTPException as e: # pylint: disable=C0103
             clean_url = redact_sas_tokens_in_urls(url)
             msg = '[HTTP Failed] {0} {1} -- HttpException {2}'.format(method, clean_url, e)
             if _is_retry_exception(e):
                 continue
             break
 
-        except IOError as e:
+        except IOError as e: # pylint: disable=C0103
             IOErrorCounter.increment(host=host, port=port)
             clean_url = redact_sas_tokens_in_urls(url)
             msg = '[HTTP Failed] {0} {1} -- IOError {2}'.format(method, clean_url, e)
@@ -459,7 +461,7 @@ def http_request(method,
     raise HttpError("{0} -- {1} attempts made".format(msg, attempt))
 
 
-def http_get(url,
+def http_get(url, # pylint: disable=R0913,W0102
              headers=None,
              use_proxy=False,
              max_retry=DEFAULT_RETRIES,
@@ -474,7 +476,7 @@ def http_get(url,
                         retry_delay=retry_delay)
 
 
-def http_head(url,
+def http_head(url, # pylint: disable=R0913,W0102
               headers=None,
               use_proxy=False,
               max_retry=DEFAULT_RETRIES,
@@ -489,7 +491,7 @@ def http_head(url,
                         retry_delay=retry_delay)
 
 
-def http_post(url,
+def http_post(url, # pylint: disable=R0913,W0102
               data,
               headers=None,
               use_proxy=False,
@@ -505,23 +507,25 @@ def http_post(url,
                         retry_delay=retry_delay)
 
 
-def http_put(url,
+def http_put(url, # pylint: disable=R0913,W0102
              data,
              headers=None,
              use_proxy=False,
              max_retry=DEFAULT_RETRIES,
              retry_codes=RETRY_CODES,
-             retry_delay=DELAY_IN_SECONDS):
+             retry_delay=DELAY_IN_SECONDS,
+             redact_data=False):
 
     return http_request("PUT",
                         url, data, headers=headers,
                         use_proxy=use_proxy,
                         max_retry=max_retry,
                         retry_codes=retry_codes,
-                        retry_delay=retry_delay)
+                        retry_delay=retry_delay,
+                        redact_data=redact_data)
 
 
-def http_delete(url,
+def http_delete(url, # pylint: disable=R0913,W0102
                 headers=None,
                 use_proxy=False,
                 max_retry=DEFAULT_RETRIES,
@@ -536,17 +540,19 @@ def http_delete(url,
                         retry_delay=retry_delay)
 
 
-def request_failed(resp, ok_codes=OK_CODES):
+def request_failed(resp, ok_codes=OK_CODES): # pylint: disable=W0102
     return not request_succeeded(resp, ok_codes=ok_codes)
 
 
-def request_succeeded(resp, ok_codes=OK_CODES):
+def request_succeeded(resp, ok_codes=OK_CODES): # pylint: disable=W0102
     return resp is not None and resp.status in ok_codes
+
 
 def request_not_modified(resp):
     return resp is not None and resp.status in NOT_MODIFIED_CODES
 
-def request_failed_at_hostplugin(resp, upstream_failure_codes=HOSTPLUGIN_UPSTREAM_FAILURE_CODES):
+
+def request_failed_at_hostplugin(resp, upstream_failure_codes=HOSTPLUGIN_UPSTREAM_FAILURE_CODES): # pylint: disable=W0102
     """
     Host plugin will return 502 for any upstream issue, so a failure is any 5xx except 502
     """
@@ -558,9 +564,9 @@ def read_response_error(resp):
     if resp is not None:
         try:
             result = "[HTTP Failed] [{0}: {1}] {2}".format(
-                        resp.status,
-                        resp.reason,
-                        resp.read())
+                        resp.status, 
+                        resp.reason, 
+                        resp.read()) 
 
             # this result string is passed upstream to several methods
             # which do a raise HttpError() or a format() of some kind;

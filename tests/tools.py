@@ -23,32 +23,36 @@ import os
 import pprint
 import re
 import shutil
+import stat
 import sys
 import tempfile
+import time
 import unittest
 from functools import wraps
+from threading import currentThread
 
-import time
-
-import azurelinuxagent.common.event as event
 import azurelinuxagent.common.conf as conf
+import azurelinuxagent.common.event as event
 import azurelinuxagent.common.logger as logger
+from azurelinuxagent.common.future import range # pylint: disable=redefined-builtin
+from azurelinuxagent.common.cgroupapi import SYSTEMD_RUN_PATH
 from azurelinuxagent.common.utils import fileutil
-
 from azurelinuxagent.common.version import PY_VERSION_MAJOR
 
-# Import mock module for Python2 and Python3
 try:
-    from unittest.mock import Mock, patch, MagicMock, ANY, DEFAULT, call
+    from unittest.mock import Mock, patch, MagicMock, ANY, DEFAULT, call, PropertyMock # pylint: disable=unused-import,ungrouped-imports
+
+    # Import mock module for Python2 and Python3
+    from bin.waagent2 import Agent # pylint: disable=unused-import
 except ImportError:
-    from mock import Mock, patch, MagicMock, ANY, DEFAULT, call
+    from mock import Mock, patch, MagicMock, ANY, DEFAULT, call, PropertyMock
 
-test_dir = os.path.dirname(os.path.abspath(__file__))
-data_dir = os.path.join(test_dir, "data")
+test_dir = os.path.dirname(os.path.abspath(__file__)) # pylint: disable=invalid-name
+data_dir = os.path.join(test_dir, "data") # pylint: disable=invalid-name
 
-debug = False
+debug = False # pylint: disable=invalid-name
 if os.environ.get('DEBUG') == '1':
-    debug = True
+    debug = True # pylint: disable=invalid-name
 
 # Enable verbose logger to stdout
 if debug:
@@ -58,6 +62,18 @@ if debug:
 _MAX_LENGTH = 120
 
 _MAX_LENGTH_SAFE_REPR = 80
+
+# Mock sleep to reduce test execution time
+_SLEEP = time.sleep
+
+
+def mock_sleep(sec=0.01):
+    """
+    Mocks the time.sleep method to reduce unit test time
+    :param sec: Time to replace the sleep call with, default = 0.01sec
+    """
+    _SLEEP(sec)
+
 
 def safe_repr(obj, short=False):
     try:
@@ -98,15 +114,31 @@ def _safe_repr(obj, short=False):
     return result[:_MAX_LENGTH] + ' [truncated]...'
 
 
+def running_under_travis():
+    return 'TRAVIS' in os.environ and os.environ['TRAVIS'] == 'true'
+
+
+def is_systemd_present():
+    return os.path.exists(SYSTEMD_RUN_PATH)
+
+
+def i_am_root():
+    return os.geteuid() == 0
+
+
+def is_python_version_26():
+    return sys.version_info[0] == 2 and sys.version_info[1] == 6
+
+
 class AgentTestCase(unittest.TestCase):
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls): # pylint: disable=too-many-branches
         # Setup newer unittest assertions missing in prior versions of Python
 
         if not hasattr(cls, "assertRegex"):
             cls.assertRegex = cls.assertRegexpMatches if hasattr(cls, "assertRegexpMatches") else cls.emulate_assertRegexpMatches
         if not hasattr(cls, "assertNotRegex"):
-            cls.assertNotRegex = cls.assertNotRegexpMatches if hasattr(cls, "assertNotRegexpMatches") else cls.emulate_assertNotRegexpMatches
+            cls.assertNotRegex = cls.assertNotRegexpMatches if hasattr(cls, "assertNotRegexpMatches") else cls.emulate_assertNotRegexpMatches # pylint: disable=no-member
         if not hasattr(cls, "assertIn"):
             cls.assertIn = cls.emulate_assertIn
         if not hasattr(cls, "assertNotIn"):
@@ -129,11 +161,14 @@ class AgentTestCase(unittest.TestCase):
             cls.assertRaisesRegex = cls.emulate_raises_regex
         if not hasattr(cls, "assertListEqual"):
             cls.assertListEqual = cls.emulate_assertListEqual
+        if not hasattr(cls, "assertIsInstance"):
+            cls.assertIsInstance = cls.emulate_assertIsInstance
         if sys.version_info < (2, 7):
             # assertRaises does not implement a context manager in 2.6; override it with emulate_assertRaises but
             # keep a pointer to the original implementation to use when a context manager is not requested.
             cls.original_assertRaises = unittest.TestCase.assertRaises
             cls.assertRaises = cls.emulate_assertRaises
+            cls.assertDictEqual = cls.emulate_assertDictEqual
 
     @classmethod
     def tearDownClass(cls):
@@ -160,53 +195,53 @@ class AgentTestCase(unittest.TestCase):
         if not debug and self.tmp_dir is not None:
             shutil.rmtree(self.tmp_dir)
 
-    def emulate_assertIn(self, a, b, msg=None):
+    def emulate_assertIn(self, a, b, msg=None): # pylint: disable=invalid-name
         if a not in b:
             msg = msg if msg is not None else "{0} not found in {1}".format(_safe_repr(a), _safe_repr(b))
             self.fail(msg)
 
-    def emulate_assertNotIn(self, a, b, msg=None):
+    def emulate_assertNotIn(self, a, b, msg=None): # pylint: disable=invalid-name
         if a in b:
             msg = msg if msg is not None else "{0} unexpectedly found in {1}".format(_safe_repr(a), _safe_repr(b))
             self.fail(msg)
 
-    def emulate_assertGreater(self, a, b, msg=None):
+    def emulate_assertGreater(self, a, b, msg=None): # pylint: disable=invalid-name
         if not a > b:
             msg = msg if msg is not None else '{0} not greater than {1}'.format(_safe_repr(a), _safe_repr(b))
             self.fail(msg)
 
-    def emulate_assertGreaterEqual(self, a, b, msg=None):
+    def emulate_assertGreaterEqual(self, a, b, msg=None): # pylint: disable=invalid-name
         if not a >= b:
             msg = msg if msg is not None else '{0} not greater or equal to {1}'.format(_safe_repr(a), _safe_repr(b))
             self.fail(msg)
 
-    def emulate_assertLess(self, a, b, msg=None):
+    def emulate_assertLess(self, a, b, msg=None): # pylint: disable=invalid-name
         if not a < b:
             msg = msg if msg is not None else '{0} not less than {1}'.format(_safe_repr(a), _safe_repr(b))
             self.fail(msg)
 
-    def emulate_assertLessEqual(self, a, b, msg=None):
+    def emulate_assertLessEqual(self, a, b, msg=None): # pylint: disable=invalid-name
         if not a <= b:
             msg = msg if msg is not None else '{0} not less or equal to {1}'.format(_safe_repr(a), _safe_repr(b))
             self.fail(msg)
 
-    def emulate_assertIsNone(self, x, msg=None):
+    def emulate_assertIsNone(self, x, msg=None): # pylint: disable=invalid-name
         if x is not None:
             msg = msg if msg is not None else '{0} is not None'.format(_safe_repr(x))
             self.fail(msg)
 
-    def emulate_assertIsNotNone(self, x, msg=None):
+    def emulate_assertIsNotNone(self, x, msg=None): # pylint: disable=invalid-name
         if x is None:
             msg = msg if msg is not None else '{0} is None'.format(_safe_repr(x))
             self.fail(msg)
 
-    def emulate_assertRegexpMatches(self, text, regexp, msg=None):
+    def emulate_assertRegexpMatches(self, text, regexp, msg=None): # pylint: disable=invalid-name
         if re.search(regexp, text) is not None:
             return
         msg = msg if msg is not None else "'{0}' does not match '{1}'.".format(text, regexp)
         self.fail(msg)
 
-    def emulate_assertNotRegexpMatches(self, text, regexp, msg=None):
+    def emulate_assertNotRegexpMatches(self, text, regexp, msg=None): # pylint: disable=invalid-name
         if re.search(regexp, text, flags=1) is None:
             return
         msg = msg if msg is not None else "'{0}' should not match '{1}'.".format(text, regexp)
@@ -221,22 +256,22 @@ class AgentTestCase(unittest.TestCase):
             return self
 
         @staticmethod
-        def _get_type_name(type):
+        def _get_type_name(type): # pylint: disable=redefined-builtin
             return type.__name__ if hasattr(type, "__name__") else str(type)
 
         def __exit__(self, exception_type, exception, *_):
             if exception_type is None:
-                expected = AgentTestCase._AssertRaisesContextManager._get_type_name(self._expected_exception_type)
+                expected = AgentTestCase._AssertRaisesContextManager._get_type_name(self._expected_exception_type) # pylint: disable=protected-access
                 self._test_case.fail("Did not raise an exception; expected '{0}'".format(expected))
             if not issubclass(exception_type, self._expected_exception_type):
-                raised = AgentTestCase._AssertRaisesContextManager._get_type_name(exception_type)
-                expected = AgentTestCase._AssertRaisesContextManager._get_type_name(self._expected_exception_type)
+                raised = AgentTestCase._AssertRaisesContextManager._get_type_name(exception_type) # pylint: disable=protected-access
+                expected = AgentTestCase._AssertRaisesContextManager._get_type_name(self._expected_exception_type) # pylint: disable=protected-access
                 self._test_case.fail("Raised '{0}', but expected '{1}'".format(raised, expected))
 
-            self.exception = exception
+            self.exception = exception # pylint: disable=attribute-defined-outside-init
             return True
 
-    def emulate_assertRaises(self, exception_type, function=None, *args, **kwargs):
+    def emulate_assertRaises(self, exception_type, function=None, *args, **kwargs): # pylint: disable=invalid-name,keyword-arg-before-vararg
         # return a context manager only when function is not provided; otherwise use the original assertRaises
         if function is None:
             return AgentTestCase._AssertRaisesContextManager(exception_type, self)
@@ -248,15 +283,29 @@ class AgentTestCase(unittest.TestCase):
     def emulate_raises_regex(self, exception_type, regex, function, *args, **kwargs):
         try:
             function(*args, **kwargs)
-        except Exception as e:
-            if re.search(regex, str(e), flags=1) is not None:
+        except Exception as e: # pylint: disable=invalid-name
+            if re.search(regex, str(e), flags=1) is not None: # pylint: disable=no-else-return
                 return
             else:
                 self.fail("Expected exception {0} matching {1}.  Actual: {2}".format(
                     exception_type, regex, str(e)))
         self.fail("No exception was thrown.  Expected exception {0} matching {1}".format(exception_type, regex))
 
-    def emulate_assertListEqual(self, seq1, seq2, msg=None, seq_type=None):
+    def emulate_assertDictEqual(self, first, second, msg=None): # pylint: disable=invalid-name
+        def fail(message):
+            self.fail(self._formatMessage(msg, message))
+
+        for k in first.keys():
+            if k not in second:
+                fail("'{0}' is missing from second".format(k))
+            if first[k] != second[k]:
+                fail("'{0}' != '{1}' (key: {2})".format(first[k], second[k], k))
+
+        for k in second.keys():
+            if k not in first:
+                fail("'{0}' is missing from first".format(k))
+
+    def emulate_assertListEqual(self, seq1, seq2, msg=None, seq_type=None): # pylint: disable=too-many-branches,invalid-name
         """An equality assertion for ordered sequences (like lists and tuples).
 
         For the purposes of this function, a valid ordered sequence type is one
@@ -308,7 +357,7 @@ class AgentTestCase(unittest.TestCase):
             elements = (seq_type_name.capitalize(), seq1_repr, seq2_repr)
             differing = '%ss differ: %s != %s\n' % elements
 
-            for i in xrange(min(len1, len2)):
+            for i in range(min(len1, len2)):
                 try:
                     item1 = seq1[i]
                 except (TypeError, IndexError, NotImplementedError):
@@ -329,7 +378,7 @@ class AgentTestCase(unittest.TestCase):
                     break
             else:
                 if (len1 == len2 and seq_type is None and
-                    type(seq1) != type(seq2)):
+                    type(seq1) != type(seq2)): # pylint: disable=unidiomatic-typecheck
                     # The sequences are the same, but have differing types.
                     return
 
@@ -351,20 +400,53 @@ class AgentTestCase(unittest.TestCase):
                 except (TypeError, IndexError, NotImplementedError):
                     differing += ('Unable to index element %d '
                                   'of second %s\n' % (len1, seq_type_name))
-        standardMsg = differing
-        diffMsg = '\n' + '\n'.join(
+        standardMsg = differing # pylint: disable=invalid-name
+        diffMsg = '\n' + '\n'.join( # pylint: disable=invalid-name
             difflib.ndiff(pprint.pformat(seq1).splitlines(),
                           pprint.pformat(seq2).splitlines()))
-        standardMsg = self._truncateMessage(standardMsg, diffMsg)
+        standardMsg = self._truncateMessage(standardMsg, diffMsg) # pylint: disable=invalid-name
         msg = self._formatMessage(msg, standardMsg)
         self.fail(msg)
+
+    def emulate_assertIsInstance(self, obj, object_type, msg=None): # pylint: disable=invalid-name
+        if not isinstance(obj, object_type):
+            msg = msg if msg is not None else '{0} is not an instance of {1}'.format(_safe_repr(obj),
+                                                                                     _safe_repr(object_type))
+            self.fail(msg)
 
     @staticmethod
     def _create_files(tmp_dir, prefix, suffix, count, with_sleep=0):
         for i in range(count):
-            f = os.path.join(tmp_dir, '.'.join((prefix, str(i), suffix)))
+            f = os.path.join(tmp_dir, '.'.join((prefix, str(i), suffix))) # pylint: disable=invalid-name
             fileutil.write_file(f, "faux content")
             time.sleep(with_sleep)
+
+    def create_script(self, file_name, contents, file_path=None):
+        """
+        Creates an executable script with the given contents.
+        If file_name ends with ".py", it creates a Python3 script, otherwise it creates a bash script
+        :param file_name: The name of the file to create the script with
+        :param contents: Contents of the script file
+        :param file_path: The path of the file where to create it in (we use /tmp/ by default)
+        :return:
+        """
+        if not file_path:
+            file_path = os.path.join(self.tmp_dir, file_name)
+
+        directory = os.path.dirname(file_path)
+        if not os.path.exists(directory):
+            os.mkdir(directory)
+
+        with open(file_path, "w") as script:
+            if file_name.endswith(".py"):
+                script.write("#!/usr/bin/env python3\n")
+            else:
+                script.write("#!/usr/bin/env bash\n")
+            script.write(contents)
+
+        os.chmod(file_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+
+        return file_name
 
 
 def load_data(name):
@@ -381,7 +463,7 @@ def load_bin_data(name):
         return data_file.read()
 
 
-supported_distro = [
+supported_distro = [ # pylint: disable=invalid-name
     ["ubuntu", "12.04", ""],
     ["ubuntu", "14.04", ""],
     ["ubuntu", "14.10", ""],
@@ -434,3 +516,9 @@ def distros(distro_name=".*", distro_version=".*", distro_full_name=".*"):
     return decorator
 
 
+def clear_singleton_instances(cls):
+    # Adding this lock to avoid any race conditions
+    with cls._lock: # pylint: disable=protected-access
+        obj_name = "%s__%s" % (cls.__name__, currentThread().getName())  # Object Name = className__threadName
+        if obj_name in cls._instances: # pylint: disable=protected-access
+            del cls._instances[obj_name] # pylint: disable=protected-access
